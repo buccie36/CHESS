@@ -1,0 +1,80 @@
+#include <msp430.h>
+#include <stdint.h>
+
+#define CS_PIN     BIT2    // P1.2 as CS
+#define MOSI_PIN   BIT6    // P1.6 as MOSI
+#define SCLK_PIN   BIT5    // P1.5 as SCLK
+
+void SPI_init(void);
+void MAX7219_write(uint8_t address, uint8_t data);
+void MAX7219_init(void);
+void display_happy_face(void);
+
+// Happy face pattern (8x8)
+const uint8_t happyFace[8] = {
+    0b00111100,
+    0b01000010,
+    0b10100101,
+    0b10000001,
+    0b10100101,
+    0b10011001,
+    0b01000010,
+    0b00111100
+};
+
+void main(void) {
+    WDTCTL = WDTPW | WDTHOLD;   // Stop watchdog timer
+
+    // Set CS (P1.2) as output
+    P1DIR |= CS_PIN;
+    P1OUT |= CS_PIN;
+
+    SPI_init();
+    MAX7219_init();
+    display_happy_face();
+
+    while (1);  // Idle loop
+}
+
+void SPI_init(void) {
+    // Set MOSI and SCLK as primary module function
+    P1SEL0 |= MOSI_PIN | SCLK_PIN;
+    P1SEL1 &= ~(MOSI_PIN | SCLK_PIN);
+
+    UCA0CTLW0 = UCSWRST;   // Put eUSCI in reset
+    UCA0CTLW0 |= UCSSEL_2 | UCMST | UCSYNC | UCCKPH | UCMSB; // SMCLK, master, sync, MSB first
+    UCA0BR0 = 0x02;        // Baud rate divider
+    UCA0BR1 = 0;
+    UCA0CTLW0 &= ~UCSWRST; // Release for operation
+}
+
+void MAX7219_write(uint8_t address, uint8_t data) {
+    P1OUT &= ~CS_PIN;                   // CS Low to begin transmission
+    while (!(UCA0IFG & UCTXIFG));       // Wait for TX ready
+    UCA0TXBUF = address;                // Send address
+    while (!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = data;                   // Send data
+    while (!(UCA0IFG & UCTXIFG));
+    P1OUT |= CS_PIN;                    // CS High to latch data
+}
+
+void MAX7219_init(void) {
+    MAX7219_write(0x09, 0x00); // Decode mode: none
+    MAX7219_write(0x0A, 0x03); // Intensity: range 0x00 to 0x0F
+    MAX7219_write(0x0B, 0x07); // Scan limit: Display all 8 digits
+    MAX7219_write(0x0C, 0x01); // Shutdown register: Normal operation
+    MAX7219_write(0x0F, 0x00); // Display test: off
+
+    // Clear display
+    uint8_t i;
+    for (i = 1; i <= 8; i++) {
+        MAX7219_write(i, 0x00);
+    }
+}
+
+void display_happy_face(void) {
+    uint8_t i;
+    for (i = 0; i < 8; i++) {
+        MAX7219_write(i + 1, happyFace[i]);
+    }
+}
