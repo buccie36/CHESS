@@ -1,0 +1,50 @@
+
+
+import tkinter as tk
+import chess
+import chess.engine
+
+# --- Configure Stockfish Path ---
+STOCKFISH_PATH = r"stockfish\stockfish-windows-x86-64-avx2.exe"
+# --- Create Board ---
+board = chess.Board()
+
+# --- Start Stockfish Engine ---
+engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+
+# --- GUI Setup ---
+root = tk.Tk()
+root.title("Smart Chessboard GUI")
+
+buttons = {}
+
+def square_clicked(square):
+    if board.piece_at(square):
+        piece = board.piece_at(square)
+        print(f"Piece {piece.symbol()} at {chess.square_name(square)} selected")
+
+        legal_moves = [
+            move for move in board.legal_moves if move.from_square == square
+        ]
+
+        highlight_squares([move.to_square for move in legal_moves])
+
+def highlight_squares(squares):
+    for sq in range(64):
+        row, col = divmod(sq, 8)
+        color = "#EEE" if (row + col) % 2 == 0 else "#555"
+        if sq in squares:
+            color = "#77F"
+        buttons[sq].config(bg=color)
+
+# --- Build 8x8 Button Grid ---
+for i in range(8):
+    for j in range(8):
+        square = chess.square(j, 7 - i)
+        btn = tk.Button(root, width=4, height=2, bg="#EEE" if (i + j) % 2 == 0 else "#555",
+                        command=lambda sq=square: square_clicked(sq))
+        btn.grid(row=i, column=j)
+        buttons[square] = btn
+
+root.mainloop()
+engine.quit()
