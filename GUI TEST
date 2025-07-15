@@ -1,50 +1,96 @@
-
-
 import tkinter as tk
 import chess
 import chess.engine
 
 # --- Configure Stockfish Path ---
 STOCKFISH_PATH = r"stockfish\stockfish-windows-x86-64-avx2.exe"
-# --- Create Board ---
-board = chess.Board()
 
-# --- Start Stockfish Engine ---
+# --- Create Board and Engine ---
+board = chess.Board()
 engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
 
 # --- GUI Setup ---
 root = tk.Tk()
 root.title("Smart Chessboard GUI")
 
+# Frames
+board_frame = tk.Frame(root)
+board_frame.grid(row=0, column=0)
+
+eval_frame = tk.Frame(root, width=40, height=320)
+eval_frame.grid(row=0, column=1, padx=10)
+eval_canvas = tk.Canvas(eval_frame, width=40, height=320, bg="white")
+eval_canvas.pack()
+
 buttons = {}
+selected_square = None
+eval_bar = None
 
 def square_clicked(square):
-    if board.piece_at(square):
+    global selected_square
+
+    if selected_square is None:
+        # First click: select a piece
         piece = board.piece_at(square)
-        print(f"Piece {piece.symbol()} at {chess.square_name(square)} selected")
-
-        legal_moves = [
-            move for move in board.legal_moves if move.from_square == square
-        ]
-
-        highlight_squares([move.to_square for move in legal_moves])
+        if piece and piece.color == board.turn:
+            selected_square = square
+            legal_moves = [move for move in board.legal_moves if move.from_square == square]
+            highlight_squares([move.to_square for move in legal_moves])
+    else:
+        move = chess.Move(from_square=selected_square, to_square=square)
+        if move in board.legal_moves:
+            board.push(move)
+            update_board()
+            update_eval_bar()
+        selected_square = None
+        highlight_squares([])
 
 def highlight_squares(squares):
     for sq in range(64):
         row, col = divmod(sq, 8)
-        color = "#EEE" if (row + col) % 2 == 0 else "#555"
+        color = "#555" if (row + col) % 2 == 0 else "#EEE"
         if sq in squares:
             color = "#77F"
         buttons[sq].config(bg=color)
+
+def update_board():
+    for sq in range(64):
+        piece = board.piece_at(sq)
+        text = piece.symbol() if piece else " "
+        buttons[sq].config(text=text.upper() if piece and piece.color == chess.WHITE else text.lower())
+
+def update_eval_bar():
+    global eval_bar
+    try:
+        result = engine.analyse(board, chess.engine.Limit(time=0.1))
+        score = result["score"].white().score(mate_score=10000)  # Positive if White is better
+    except:
+        score = 0  # If game is over
+
+    # Normalize score to [-1000, +1000] range
+    score = max(min(score, 1000), -1000)
+    bar_center = 160  # Canvas height / 2
+    bar_height = int(160 - (score / 1000.0) * 160)  # Flip score to display white on top
+
+    eval_canvas.delete("all")
+    eval_canvas.create_rectangle(0, 0, 40, bar_height, fill="black", width=0)
+    eval_canvas.create_rectangle(0, bar_height, 40, 320, fill="white", width=0)
 
 # --- Build 8x8 Button Grid ---
 for i in range(8):
     for j in range(8):
         square = chess.square(j, 7 - i)
-        btn = tk.Button(root, width=4, height=2, bg="#EEE" if (i + j) % 2 == 0 else "#555",
+        btn = tk.Button(board_frame, width=4, height=2,
+                        bg="#555" if ((7 - i + j) % 2 == 0) else "#EEE",
+                        fg="black", font=("Courier", 14),
                         command=lambda sq=square: square_clicked(sq))
         btn.grid(row=i, column=j)
         buttons[square] = btn
 
+
+update_board()
+update_eval_bar()
+
 root.mainloop()
 engine.quit()
+
