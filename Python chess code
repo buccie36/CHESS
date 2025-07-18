@@ -1,0 +1,172 @@
+import tkinter as tk
+import chess
+import chess.engine
+import serial
+
+# --- Configure Stockfish Path & Serial Port ---
+STOCKFISH_PATH = r"stockfish\\stockfish-windows-x86-64-avx2.exe"
+SERIAL_PORT = "COM7"   # Update to your MSP430 COM port
+BAUD_RATE = 9600
+
+# --- Create Board, Engine, Serial ---
+board = chess.Board()
+engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+history = []
+
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+except serial.SerialException:
+    ser = None
+    print("Warning: Serial port not found. LED communication disabled.")
+
+# --- GUI Setup ---
+root = tk.Tk()
+root.title("Smart Chessboard GUI")
+
+board_frame = tk.Frame(root)
+board_frame.grid(row=0, column=0)
+
+right_frame = tk.Frame(root)
+right_frame.grid(row=0, column=1, padx=10, sticky="n")
+
+eval_canvas = tk.Canvas(right_frame, width=40, height=320, bg="white")
+eval_canvas.pack()
+
+best_move_label = tk.Label(right_frame, text="Best moves:", font=("Arial", 12), justify="left", anchor="w")
+best_move_label.pack(pady=(10, 5), anchor="w")
+
+move_history_label = tk.Label(right_frame, text="Move History:", font=("Arial", 12), anchor="w")
+move_history_label.pack(pady=(15, 2), anchor="w")
+
+move_listbox = tk.Listbox(right_frame, height=20, width=25)
+move_listbox.pack()
+
+buttons = {}
+selected_square = None
+
+def square_clicked(square):
+    global selected_square
+
+    if selected_square is None:
+        piece = board.piece_at(square)
+        if piece and piece.color == board.turn:
+            selected_square = square
+            legal_moves = [m for m in board.legal_moves if m.from_square == square]
+            highlight_squares([m.to_square for m in legal_moves])
+            send_led_positions([m.to_square for m in legal_moves])
+    else:
+        move = chess.Move(from_square=selected_square, to_square=square)
+        if move in board.legal_moves:
+            board.push(move)
+            history.append(board.fen())
+            update_board()
+            update_eval_bar()
+            update_move_list()
+            if ser:
+                ser.write(b'CLEAR\n')
+        selected_square = None
+        highlight_squares([])
+        send_led_positions([])
+
+def send_led_positions(squares):
+    if not ser:
+        return
+    if not squares:
+        ser.write(b'CLEAR\n')
+        return
+
+    coords = []
+    for sq in squares:
+        rank = 7 - chess.square_rank(sq)
+        file = chess.square_file(sq)
+        coords.append(f"{file},{rank}")
+    
+    msg = "LED:" + ";".join(coords) + "\n"
+    ser.write(msg.encode())
+
+def highlight_squares(squares):
+    for sq in range(64):
+        row, col = divmod(sq, 8)
+        color = "#EEE" if ((7 - row + col) % 2 == 0) else "#555"
+        if sq in squares:
+            color = "#77F"
+        buttons[sq].config(bg=color)
+
+def update_board():
+    for sq in range(64):
+        piece = board.piece_at(sq)
+        text = piece.symbol() if piece else " "
+        buttons[sq].config(text=text.upper() if piece and piece.color == chess.WHITE else text.lower())
+
+def update_eval_bar():
+    try:
+        infos = engine.analyse(board, chess.engine.Limit(time=0.3), multipv=3)
+
+        move_texts = []
+        for info in infos:
+            move = info.get("pv", [None])[0]
+            if move:
+                move_str = board.san(move)
+                score = info["score"].white()
+                if score.is_mate():
+                    eval_str = f"Mate in {score.mate()}"
+                else:
+                    cp = score.score()
+                    eval_str = f"{'White' if cp > 0 else 'Black'} +{abs(cp)}"
+                move_texts.append(f"{move_str} ({eval_str})")
+
+        best_move_label.config(text="Best moves:\n" + "\n".join(move_texts))
+
+        top_score = infos[0]["score"].white()
+        score_val = 1000 if top_score.is_mate() and top_score.mate() > 0 else \
+                    -1000 if top_score.is_mate() else top_score.score()
+    except:
+        score_val = 0
+        best_move_label.config(text="Best moves:\n(none)")
+
+    score_val = max(min(score_val, 1000), -1000)
+    bar_height = int(160 - (score_val / 1000.0) * 160)
+
+    eval_canvas.delete("all")
+    eval_canvas.create_rectangle(0, 0, 40, bar_height, fill="black", width=0)
+    eval_canvas.create_rectangle(0, bar_height, 40, 320, fill="white", width=0)
+
+def update_move_list():
+    move_listbox.delete(0, tk.END)
+    game = chess.Board()
+    for move in board.move_stack:
+        san = game.san(move)
+        move_listbox.insert(tk.END, san)
+        game.push(move)
+
+def on_move_selected(evt):
+    if move_listbox.curselection():
+        index = move_listbox.curselection()[0]
+        board.reset()
+        for i in range(index + 1):
+            move = board.legal_moves.__iter__().__next__()
+            move = board.parse_san(move_listbox.get(i))
+            board.push(move)
+        update_board()
+        update_eval_bar()
+
+move_listbox.bind("<<ListboxSelect>>", on_move_selected)
+
+for i in range(8):
+    for j in range(8):
+        square = chess.square(j, 7 - i)
+        btn = tk.Button(board_frame, width=4, height=2,
+                        bg="#EEE" if ((7 - i + j) % 2 == 0) else "#555",
+                        fg="black", font=("Courier", 14),
+                        command=lambda sq=square: square_clicked(sq))
+        btn.grid(row=i, column=j)
+        buttons[square] = btn
+
+update_board()
+update_eval_bar()
+update_move_list()
+
+root.mainloop()
+engine.quit()
+if ser:
+    ser.close()
