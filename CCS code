@@ -1,0 +1,146 @@
+#include <msp430.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define DIN     BIT0  // P2.0
+#define CLK     BIT1  // P2.1
+#define CS      BIT2  // P2.2
+
+char uart_buffer[128];
+unsigned int uart_index = 0;
+unsigned char led_matrix[8] = {0};
+
+void delay() {
+    __delay_cycles(50);
+}
+
+void pulseClock() {
+    P2OUT |= CLK;  // Set CLK high
+    delay();       // Short delay
+    P2OUT &= ~CLK; // Set CLK low
+    delay();       // Short delay
+}
+
+void sendByte(unsigned char data) {
+    int i;
+    for (i = 7; i >= 0; i--) {  // Declare loop variable outside the loop
+        if (data & (1 << i)) 
+            P2OUT |= DIN;  // Set DIN high
+        else 
+            P2OUT &= ~DIN; // Set DIN low
+        
+        pulseClock();  // Send clock pulse
+    }
+}
+
+void max7219Send(unsigned char address, unsigned char data) {
+    P2OUT &= ~CS;      // Load CS low to start communication
+    sendByte(address); // Send address
+    sendByte(data);    // Send data
+    P2OUT |= CS;       // Load CS high to end communication
+    delay();
+}
+
+void max7219Init() {
+    max7219Send(0x0C, 0x01); // Normal operation
+    max7219Send(0x09, 0x00); // No BCD
+    max7219Send(0x0B, 0x07); // Scan all digits
+    max7219Send(0x0A, 0x0F); // Max brightness
+    max7219Send(0x0F, 0x00); // Display test off
+
+    int o;
+    for (o = 1; o <= 8; o++) {  // Declare loop variable outside the loop
+        max7219Send(o, 0x00);  // Send 0 to all rows
+    }
+}
+
+void updateMatrix() {
+    int row;
+    for (row = 0; row < 8; row++) {  // Declare loop variable outside the loop
+        max7219Send(row + 1, led_matrix[row]); // Send data to MAX7219
+    }
+}
+
+void clearMatrix() {
+    memset(led_matrix, 0, sizeof(led_matrix)); // Clear led_matrix
+    updateMatrix();
+}
+
+void parseLEDCommand(char *cmd) {
+    clearMatrix();  // Clear previous board state
+    char *pair = strtok(cmd, ";");
+    while (pair != NULL) {
+        int col, row;
+        if (sscanf(pair, "%d,%d", &col, &row) == 2) {
+            if (row >= 0 && row < 8 && col >= 0 && col < 8) {
+                led_matrix[row] |= (1 << (7 - col)); // Set the bit for the LED
+            }
+        }
+        pair = strtok(NULL, ";");
+    }
+    updateMatrix();  // Update the matrix with the new legal moves
+}
+
+void processCommand(char *cmd) {
+    if (strncmp(cmd, "LED:", 4) == 0) {
+        parseLEDCommand(cmd + 4);  // Parse the LED command (legal moves)
+    } else if (strncmp(cmd, "CLEAR", 5) == 0) {
+        clearMatrix();  // Clear the matrix
+    }
+}
+
+void uartInit() {
+    P1SEL0 |= BIT4 | BIT5;  // RXD/TXD
+    P1SEL1 &= ~(BIT4 | BIT5); // Reset RXD/TXD
+
+    UCA0CTLW0 = UCSWRST;    // Put USCI in reset
+    UCA0CTLW0 |= UCSSEL__SMCLK;  // Clock source: SMCLK
+    UCA0BR0 = 104;           // 9600 baud rate with 1 MHz clock
+    UCA0BR1 = 0;
+    UCA0MCTLW = 0x2100;      // Modulation settings
+    UCA0CTLW0 &= ~UCSWRST;   // Release USCI from reset
+    UCA0IE |= UCRXIE;        // Enable receive interrupt
+}
+
+void gpioInit() {
+    P2DIR |= DIN | CLK | CS; // Set P2.0, P2.1, P2.2 as outputs
+    P2OUT &= ~(DIN | CLK | CS); // Set all to low
+}
+
+int main(void) {
+    WDTCTL = WDTPW | WDTHOLD;  // Stop watchdog timer
+
+    gpioInit();
+    uartInit();
+    max7219Init();
+
+    __enable_interrupt(); // Enable global interrupt
+
+    while (1) {
+        __low_power_mode_0();  // Enter low-power mode while waiting for interrupts
+    }
+}
+
+// Interrupt Service Routine for UART receive
+#if defined(__TI_COMPILER_VERSION__) || defined(__IAR_SYSTEMS_ICC__)
+#pragma vector=USCI_A0_VECTOR
+__interrupt void USCI_A0_ISR(void)
+#elif defined(__GNUC__)
+void __attribute__ ((interrupt(USCI_A0_VECTOR))) USCI_A0_ISR(void)
+#else
+#error Compiler not supported!
+#endif
+{
+    if (UCA0IFG & UCRXIFG) {  // If RX interrupt flag is set
+        char received = UCA0RXBUF;  // Get received byte
+
+        if (received == '\n') {
+            uart_buffer[uart_index] = '\0';  // Null-terminate the buffer
+            processCommand(uart_buffer);     // Process the command
+            uart_index = 0;                 // Reset index
+        } else if (uart_index < sizeof(uart_buffer) - 1) {
+            uart_buffer[uart_index++] = received;  // Store byte in buffer
+        }
+    }
+}
