@@ -1,17 +1,34 @@
 #include <msp430.h>
 #include <stdint.h>
 
-#define CS_PIN     BIT2    // P1.2 as CS
-#define MOSI_PIN   BIT6    // P1.6 as MOSI
-#define SCLK_PIN   BIT5    // P1.5 as SCLK
+// Bit-banged SPI pin setup using P2.0 (DIN), P2.1 (CLK), P2.2 (LOAD)
+#define DATA_PIN  BIT0   // P2.0 -> MAX7219 DIN
+#define CLK_PIN   BIT1   // P2.1 -> MAX7219 CLK
+#define LOAD_PIN  BIT2   // P2.2 -> MAX7219 LOAD
 
-void SPI_init(void);
-void MAX7219_write(uint8_t address, uint8_t data);
-void MAX7219_init(void);
-void display_happy_face(void);
+#define DATA_PORT P2OUT
+#define CLK_PORT  P2OUT
+#define LOAD_PORT P2OUT
 
-// Happy face pattern (8x8)
-const uint8_t happyFace[8] = {
+#define DATA_DIR  P2DIR
+#define CLK_DIR   P2DIR
+#define LOAD_DIR  P2DIR
+
+#define DATA_HIGH()  (DATA_PORT |= DATA_PIN)
+#define DATA_LOW()   (DATA_PORT &= ~DATA_PIN)
+#define CLK_HIGH()   (CLK_PORT |= CLK_PIN)
+#define CLK_LOW()    (CLK_PORT &= ~CLK_PIN)
+#define LOAD_HIGH()  (LOAD_PORT |= LOAD_PIN)
+#define LOAD_LOW()   (LOAD_PORT &= ~LOAD_PIN)
+
+void sendByte(uint8_t address, uint8_t data);
+void sendCommand(uint8_t cmd, uint8_t value);
+void initMAX7219(void);
+void displayHappyFace(void);
+void shortDelay(void);
+
+// Happy face pattern
+const uint8_t happy_face[8] = {
     0b00111100,
     0b01000010,
     0b10100101,
@@ -22,59 +39,74 @@ const uint8_t happyFace[8] = {
     0b00111100
 };
 
-void main(void) {
-    WDTCTL = WDTPW | WDTHOLD;   // Stop watchdog timer
+void main(void)
+{
+    WDTCTL = WDTPW | WDTHOLD;   // Stop watchdog
 
-    // Set CS (P1.2) as output
-    P1DIR |= CS_PIN;
-    P1OUT |= CS_PIN;
+    // Set GPIOs as outputs
+    DATA_DIR |= DATA_PIN;
+    CLK_DIR  |= CLK_PIN;
+    LOAD_DIR |= LOAD_PIN;
 
-    SPI_init();
-    MAX7219_init();
-    display_happy_face();
+    // Set outputs low
+    DATA_LOW();
+    CLK_LOW();
+    LOAD_LOW();
 
-    while (1);  // Idle loop
+    // Unlock GPIOs
+    PM5CTL0 &= ~LOCKLPM5;
+
+    // Init display
+    initMAX7219();
+    displayHappyFace();
+
+    while (1); // Loop forever
 }
 
-void SPI_init(void) {
-    // Set MOSI and SCLK as primary module function
-    P1SEL0 |= MOSI_PIN | SCLK_PIN;
-    P1SEL1 &= ~(MOSI_PIN | SCLK_PIN);
-
-    UCA0CTLW0 = UCSWRST;   // Put eUSCI in reset
-    UCA0CTLW0 |= UCSSEL_2 | UCMST | UCSYNC | UCCKPH | UCMSB; // SMCLK, master, sync, MSB first
-    UCA0BR0 = 0x02;        // Baud rate divider
-    UCA0BR1 = 0;
-    UCA0CTLW0 &= ~UCSWRST; // Release for operation
+void shortDelay(void)
+{
+    __delay_cycles(100); // short delay (adjust if needed)
 }
 
-void MAX7219_write(uint8_t address, uint8_t data) {
-    P1OUT &= ~CS_PIN;                   // CS Low to begin transmission
-    while (!(UCA0IFG & UCTXIFG));       // Wait for TX ready
-    UCA0TXBUF = address;                // Send address
-    while (!(UCA0IFG & UCTXIFG));
-    UCA0TXBUF = data;                   // Send data
-    while (!(UCA0IFG & UCTXIFG));
-    P1OUT |= CS_PIN;                    // CS High to latch data
-}
-
-void MAX7219_init(void) {
-    MAX7219_write(0x09, 0x00); // Decode mode: none
-    MAX7219_write(0x0A, 0x03); // Intensity: range 0x00 to 0x0F
-    MAX7219_write(0x0B, 0x07); // Scan limit: Display all 8 digits
-    MAX7219_write(0x0C, 0x01); // Shutdown register: Normal operation
-    MAX7219_write(0x0F, 0x00); // Display test: off
-
-    // Clear display
-    uint8_t i;
-    for (i = 1; i <= 8; i++) {
-        MAX7219_write(i, 0x00);
+void sendByte(uint8_t address, uint8_t data)
+{
+    int i;
+    // Send address
+    for (i = 7; i >= 0; i--) {
+        (address & (1 << i)) ? DATA_HIGH() : DATA_LOW();
+        CLK_HIGH(); shortDelay();
+        CLK_LOW();  shortDelay();
     }
+    // Send data
+    for (i = 7; i >= 0; i--) {
+        (data & (1 << i)) ? DATA_HIGH() : DATA_LOW();
+        CLK_HIGH(); shortDelay();
+        CLK_LOW();  shortDelay();
+    }
+
+    // Load to display
+    LOAD_HIGH(); shortDelay();
+    LOAD_LOW();  shortDelay();
 }
 
-void display_happy_face(void) {
-    uint8_t i;
-    for (i = 0; i < 8; i++) {
-        MAX7219_write(i + 1, happyFace[i]);
+void sendCommand(uint8_t cmd, uint8_t value)
+{
+    sendByte(cmd, value);
+}
+
+void initMAX7219(void)
+{
+    sendCommand(0x0F, 0x00); // Display test off
+    sendCommand(0x0C, 0x01); // Shutdown register: Normal operation
+    sendCommand(0x0B, 0x07); // Scan limit = all 8 digits
+    sendCommand(0x09, 0x00); // No decode mode
+    sendCommand(0x0A, 0x08); // Medium intensity (0–15)
+}
+
+void displayHappyFace(void)
+{
+    uint8_t row;
+    for (row = 0; row < 8; row++) {
+        sendByte(row + 1, happy_face[row]); // MAX7219 rows = 1 to 8
     }
 }
