@@ -43,6 +43,27 @@ move_listbox.pack()
 
 buttons = {}
 selected_square = None
+def ask_promotion():
+    choice = tk.StringVar()
+
+    def select_piece(piece_code):
+        choice.set(piece_code)
+        promo_window.destroy()
+
+    promo_window = tk.Toplevel(root)
+    promo_window.title("Choose Promotion Piece")
+    tk.Label(promo_window, text="Promote to:", font=("Arial", 12)).pack(pady=10)
+
+    tk.Button(promo_window, text="Queen", command=lambda: select_piece("q"), width=10).pack(pady=2)
+    tk.Button(promo_window, text="Rook", command=lambda: select_piece("r"), width=10).pack(pady=2)
+    tk.Button(promo_window, text="Bishop", command=lambda: select_piece("b"), width=10).pack(pady=2)
+    tk.Button(promo_window, text="Knight", command=lambda: select_piece("n"), width=10).pack(pady=2)
+
+    promo_window.grab_set()
+    root.wait_window(promo_window)
+
+    piece_map = {"q": chess.QUEEN, "r": chess.ROOK, "b": chess.BISHOP, "n": chess.KNIGHT}
+    return piece_map.get(choice.get(), None)
 
 def square_clicked(square):
     global selected_square
@@ -56,6 +77,13 @@ def square_clicked(square):
             send_led_positions([m.to_square for m in legal_moves])
     else:
         move = chess.Move(from_square=selected_square, to_square=square)
+        # Check for promotions
+        if chess.square_rank(square) in [0, 7] and board.piece_at(selected_square).piece_type == chess.PAWN:
+            # Prompt user for promotion choice
+            promotion_piece = ask_promotion()
+            if promotion_piece:
+                move = chess.Move(from_square=selected_square, to_square=square, promotion=promotion_piece)
+
         if move in board.legal_moves:
             board.push(move)
             history.append(board.fen())
@@ -64,9 +92,11 @@ def square_clicked(square):
             update_move_list()
             if ser:
                 ser.write(b'CLEAR\n')
+
         selected_square = None
         highlight_squares([])
         send_led_positions([])
+
 
 def send_led_positions(squares):
     if not ser:
