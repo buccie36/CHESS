@@ -1,202 +1,190 @@
 import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+from PIL import Image, ImageTk
 import chess
+import chess.pgn
 import chess.engine
-import serial
-
-# --- Configure Stockfish Path & Serial Port ---
-STOCKFISH_PATH = r"stockfish\\stockfish-windows-x86-64-avx2.exe"
-SERIAL_PORT = "COM7"   # Update to your MSP430 COM port
-BAUD_RATE = 9600
-
-# --- Create Board, Engine, Serial ---
-board = chess.Board()
-engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-history = []
-
-try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-except serial.SerialException:
-    ser = None
-    print("Warning: Serial port not found. LED communication disabled.")
-
-# --- GUI Setup ---
-root = tk.Tk()
-root.title("Smart Chessboard GUI")
-
-board_frame = tk.Frame(root)
-board_frame.grid(row=0, column=0)
-
-right_frame = tk.Frame(root)
-right_frame.grid(row=0, column=1, padx=10, sticky="n")
-
-eval_canvas = tk.Canvas(right_frame, width=40, height=320, bg="white")
-eval_canvas.pack()
-
-best_move_label = tk.Label(right_frame, text="Best moves:", font=("Arial", 12), justify="left", anchor="w")
-best_move_label.pack(pady=(10, 5), anchor="w")
-
-move_history_label = tk.Label(right_frame, text="Move History:", font=("Arial", 12), anchor="w")
-move_history_label.pack(pady=(15, 2), anchor="w")
-
-move_listbox = tk.Listbox(right_frame, height=20, width=25)
-move_listbox.pack()
-
-buttons = {}
-selected_square = None
-def ask_promotion():
-    choice = tk.StringVar()
-
-    def select_piece(piece_code):
-        choice.set(piece_code)
-        promo_window.destroy()
-
-    promo_window = tk.Toplevel(root)
-    promo_window.title("Choose Promotion Piece")
-    tk.Label(promo_window, text="Promote to:", font=("Arial", 12)).pack(pady=10)
-
-    tk.Button(promo_window, text="Queen", command=lambda: select_piece("q"), width=10).pack(pady=2)
-    tk.Button(promo_window, text="Rook", command=lambda: select_piece("r"), width=10).pack(pady=2)
-    tk.Button(promo_window, text="Bishop", command=lambda: select_piece("b"), width=10).pack(pady=2)
-    tk.Button(promo_window, text="Knight", command=lambda: select_piece("n"), width=10).pack(pady=2)
-
-    promo_window.grab_set()
-    root.wait_window(promo_window)
-
-    piece_map = {"q": chess.QUEEN, "r": chess.ROOK, "b": chess.BISHOP, "n": chess.KNIGHT}
-    return piece_map.get(choice.get(), None)
-
-def square_clicked(square):
-    global selected_square
-
-    if selected_square is None:
-        piece = board.piece_at(square)
-        if piece and piece.color == board.turn:
-            selected_square = square
-            legal_moves = [m for m in board.legal_moves if m.from_square == square]
-            highlight_squares([m.to_square for m in legal_moves])
-            send_led_positions([m.to_square for m in legal_moves])
-    else:
-        move = chess.Move(from_square=selected_square, to_square=square)
-        # Check for promotions
-        if chess.square_rank(square) in [0, 7] and board.piece_at(selected_square).piece_type == chess.PAWN:
-            # Prompt user for promotion choice
-            promotion_piece = ask_promotion()
-            if promotion_piece:
-                move = chess.Move(from_square=selected_square, to_square=square, promotion=promotion_piece)
-
-        if move in board.legal_moves:
-            board.push(move)
-            history.append(board.fen())
-            update_board()
-            update_eval_bar()
-            update_move_list()
-            if ser:
-                ser.write(b'CLEAR\n')
-
-        selected_square = None
-        highlight_squares([])
-        send_led_positions([])
+import os
 
 
-def send_led_positions(squares):
-    if not ser:
-        return
-    if not squares:
-        ser.write(b'CLEAR\n')
-        return
+class ChessAnalyzerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Chess Analyzer")
 
-    coords = []
-    for sq in squares:
-        rank = 7 - chess.square_rank(sq)
-        file = chess.square_file(sq)
-        coords.append(f"{file},{rank}")
-    
-    msg = "LED:" + ";".join(coords) + "\n"
-    ser.write(msg.encode())
+        self.engine = chess.engine.SimpleEngine.popen_uci("stockfish/stockfish-windows-x86-64-avx2.exe")
+        self.board = chess.Board()
+        self.selected_square = None
+        self.piece_images = self.load_piece_images()
+        self.move_stack = []
+        self.legal_moves_squares = []
+        self.display_index = None  # for move navigation
 
-def highlight_squares(squares):
-    for sq in range(64):
-        row, col = divmod(sq, 8)
-        color = "#EEE" if ((7 - row + col) % 2 == 0) else "#555"
-        if sq in squares:
-            color = "#77F"
-        buttons[sq].config(bg=color)
+        self.setup_gui()
 
-def update_board():
-    for sq in range(64):
-        piece = board.piece_at(sq)
-        text = piece.symbol() if piece else " "
-        buttons[sq].config(text=text.upper() if piece and piece.color == chess.WHITE else text.lower())
+    def setup_gui(self):
+        self.frame = tk.Frame(self.root)
+        self.frame.pack(padx=10, pady=10)
 
-def update_eval_bar():
-    try:
-        infos = engine.analyse(board, chess.engine.Limit(time=0.3), multipv=3)
+        self.board_canvas = tk.Canvas(self.frame, width=400, height=400)
+        self.board_canvas.grid(row=0, column=1, rowspan=8, padx=5)
+        self.board_canvas.bind("<Button-1>", self.on_board_click)
 
-        move_texts = []
-        for info in infos:
-            move = info.get("pv", [None])[0]
-            if move:
-                move_str = board.san(move)
-                score = info["score"].white()
-                if score.is_mate():
-                    eval_str = f"Mate in {score.mate()}"
-                else:
-                    cp = score.score()
-                    eval_str = f"{'White' if cp > 0 else 'Black'} +{abs(cp)}"
-                move_texts.append(f"{move_str} ({eval_str})")
+        self.analysis_area = scrolledtext.ScrolledText(self.frame, width=45, height=20)
+        self.analysis_area.grid(row=0, column=2, rowspan=8, padx=10)
 
-        best_move_label.config(text="Best moves:\n" + "\n".join(move_texts))
+        self.analysis_bar = tk.Canvas(self.frame, width=40, height=400, bg="#FFF")
+        self.analysis_bar.grid(row=0, column=0, rowspan=8, padx=5)
 
-        top_score = infos[0]["score"].white()
-        score_val = 1000 if top_score.is_mate() and top_score.mate() > 0 else \
-                    -1000 if top_score.is_mate() else top_score.score()
-    except:
-        score_val = 0
-        best_move_label.config(text="Best moves:\n(none)")
+        self.move_history = scrolledtext.ScrolledText(self.frame, width=45, height=10)
+        self.move_history.grid(row=8, column=1, columnspan=2, pady=5)
 
-    score_val = max(min(score_val, 1000), -1000)
-    bar_height = int(160 - (score_val / 1000.0) * 160)
+        tk.Button(self.frame, text="Previous Move", command=self.show_previous_move).grid(row=9, column=0, pady=5)
+        tk.Button(self.frame, text="Current Position", command=self.show_current_position).grid(row=9, column=1, pady=5)
+        tk.Button(self.frame, text="Load PGN", command=self.load_pgn).grid(row=9, column=2, pady=5)
+        tk.Button(self.frame, text="Reset Board", command=self.reset_board).grid(row=10, column=2, pady=5)
 
-    eval_canvas.delete("all")
-    eval_canvas.create_rectangle(0, 0, 40, bar_height, fill="black", width=0)
-    eval_canvas.create_rectangle(0, bar_height, 40, 320, fill="white", width=0)
+        self.refresh_board()
 
-def update_move_list():
-    move_listbox.delete(0, tk.END)
-    game = chess.Board()
-    for move in board.move_stack:
-        san = game.san(move)
-        move_listbox.insert(tk.END, san)
-        game.push(move)
+    def load_piece_images(self):
+        piece_symbols = {
+            "P": "wp.png", "N": "wn.png", "B": "wb.png", "R": "wr.png", "Q": "wq.png", "K": "wk.png",
+            "p": "bp.png", "n": "bn.png", "b": "bb.png", "r": "br.png", "q": "bq.png", "k": "bk.png"
+        }
+        piece_images = {}
+        for symbol, filename in piece_symbols.items():
+            img = Image.open(f"white_pawn.png")
+            piece_images[symbol] = ImageTk.PhotoImage(img.resize((50, 50)))
+        return piece_images
 
-def on_move_selected(evt):
-    if move_listbox.curselection():
-        index = move_listbox.curselection()[0]
-        board.reset()
-        for i in range(index + 1):
-            move = board.legal_moves.__iter__().__next__()
-            move = board.parse_san(move_listbox.get(i))
-            board.push(move)
-        update_board()
-        update_eval_bar()
+    def refresh_board(self):
+        self.board_canvas.delete("all")
+        for square in chess.SQUARES:
+            col, row = chess.square_file(square), chess.square_rank(square)
+            x1, y1 = col * 50, (7 - row) * 50
+            x2, y2 = x1 + 50, y1 + 50
+            color = "#F0D9B5" if (col + row) % 2 == 0 else "#B58863"
+            self.board_canvas.create_rectangle(x1, y1, x2, y2, fill=color)
 
-move_listbox.bind("<<ListboxSelect>>", on_move_selected)
+            if square in self.legal_moves_squares:
+                self.board_canvas.create_rectangle(x1, y1, x2, y2, fill="#AAF")
 
-for i in range(8):
-    for j in range(8):
-        square = chess.square(j, 7 - i)
-        btn = tk.Button(board_frame, width=4, height=2,
-                        bg="#EEE" if ((7 - i + j) % 2 == 0) else "#555",
-                        fg="black", font=("Courier", 14),
-                        command=lambda sq=square: square_clicked(sq))
-        btn.grid(row=i, column=j)
-        buttons[square] = btn
+            piece = self.board.piece_at(square)
+            if piece:
+                img = self.piece_images[piece.symbol()]
+                self.board_canvas.create_image(x1, y1, anchor=tk.NW, image=img)
 
-update_board()
-update_eval_bar()
-update_move_list()
+    def on_board_click(self, event):
+        col = event.x // 50
+        row = 7 - (event.y // 50)
+        square = chess.square(col, row)
 
-root.mainloop()
-engine.quit()
-if ser:
-    ser.close()
+        if self.selected_square is None:
+            if self.board.piece_at(square) and self.board.piece_at(square).color == self.board.turn:
+                self.selected_square = square
+                self.legal_moves_squares = [move.to_square for move in self.board.legal_moves if move.from_square == square]
+        else:
+            move = chess.Move(self.selected_square, square)
+            if move in self.board.legal_moves:
+                self.board.push(move)
+                self.move_stack.append(move)
+                self.display_index = None
+                self.selected_square = None
+                self.legal_moves_squares = []
+                self.refresh_board()
+                self.analyze_current_position()
+                self.update_move_history()
+            else:
+                self.selected_square = None
+                self.legal_moves_squares = []
+        self.refresh_board()
+
+    def analyze_current_position(self):
+        self.analysis_area.delete(1.0, tk.END)
+        with self.engine.analysis(self.board, chess.engine.Limit(time=0.1)) as analysis:
+            for info in analysis:
+                if "score" in info:
+                    score = info["score"].white().score(mate_score=10000)
+                    self.analysis_area.insert(tk.END, f"Evaluation: {score / 100:.2f}\n")
+                    self.update_analysis_bar(score / 100)
+                if "pv" in info:
+                    best_line = " ".join(str(move) for move in info["pv"])
+                    self.analysis_area.insert(tk.END, f"Best Line: {best_line}\n")
+                    break
+
+    def update_analysis_bar(self, centipawn_score):
+        self.analysis_bar.delete("all")
+        score = max(min(centipawn_score, 10), -10)
+        white_height = int((score + 10) / 20 * 400)
+        black_height = 400 - white_height
+
+        self.analysis_bar.create_rectangle(0, 0, 40, black_height, fill="#000000", outline="")
+        self.analysis_bar.create_rectangle(0, black_height, 40, 400, fill="#FFFFFF", outline="")
+        self.analysis_bar.create_text(20, 10, text="Black", fill="#FFF", anchor=tk.N)
+        self.analysis_bar.create_text(20, 390, text="White", fill="#000", anchor=tk.S)
+
+    def update_move_history(self):
+        self.move_history.delete(1.0, tk.END)
+        move_list = list(self.board.move_stack)
+        lines = []
+        for i in range(0, len(move_list), 2):
+            move_text = f"{i//2 + 1}. {move_list[i]}"
+            if i + 1 < len(move_list):
+                move_text += f" {move_list[i+1]}"
+            lines.append(move_text)
+        self.move_history.insert(tk.END, "\n".join(lines))
+
+    def load_pgn(self):
+        path = filedialog.askopenfilename(filetypes=[("PGN Files", "*.pgn")])
+        if not path:
+            return
+        with open(path, "r") as f:
+            game = chess.pgn.read_game(f)
+            self.board = game.board()
+            for move in game.mainline_moves():
+                self.board.push(move)
+        self.refresh_board()
+        self.analyze_current_position()
+        self.update_move_history()
+
+    def reset_board(self):
+        self.board.reset()
+        self.move_stack.clear()
+        self.display_index = None
+        self.legal_moves_squares = []
+        self.refresh_board()
+        self.analysis_area.delete(1.0, tk.END)
+        self.move_history.delete(1.0, tk.END)
+        self.update_analysis_bar(0)
+
+    def show_previous_move(self):
+        if self.display_index is None:
+            self.display_index = len(self.board.move_stack)
+        if self.display_index > 0:
+            self.display_index -= 1
+            self.board.pop()
+            self.refresh_board()
+            self.analyze_current_position()
+            self.update_move_history()
+
+    def show_current_position(self):
+        while self.display_index is not None and self.display_index < len(self.move_stack):
+            self.board.push(self.move_stack[self.display_index])
+            self.display_index += 1
+        self.display_index = None
+        self.refresh_board()
+        self.analyze_current_position()
+        self.update_move_history()
+
+    def on_quit(self):
+        self.engine.quit()
+        self.root.destroy()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ChessAnalyzerApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_quit)
+    root.mainloop()
+
+
