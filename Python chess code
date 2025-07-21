@@ -53,7 +53,7 @@ class ChessAnalyzerApp:
         }
         piece_images = {}
         for symbol, filename in piece_symbols.items():
-            img = Image.open(f"white_pawn.png")
+            img = Image.open(f"wp.png")
             piece_images[symbol] = ImageTk.PhotoImage(img.resize((50, 50)))
         return piece_images
 
@@ -186,5 +186,7 @@ if __name__ == "__main__":
     app = ChessAnalyzerApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_quit)
     root.mainloop()
+
+
 
 
