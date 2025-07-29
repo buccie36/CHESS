@@ -1,0 +1,103 @@
+#include <msp430.h>
+#include <stdint.h>
+
+// SPI Pins: P2.0 = DIN, P2.1 = CLK, P2.2 = LOAD
+#define DATA_PIN  BIT0
+#define CLK_PIN   BIT1
+#define LOAD_PIN  BIT2
+
+#define DATA_PORT P2OUT
+#define CLK_PORT  P2OUT
+#define LOAD_PORT P2OUT
+
+#define DATA_DIR  P2DIR
+#define CLK_DIR   P2DIR
+#define LOAD_DIR  P2DIR
+
+#define DATA_HIGH()  (DATA_PORT |= DATA_PIN)
+#define DATA_LOW()   (DATA_PORT &= ~DATA_PIN)
+#define CLK_HIGH()   (CLK_PORT |= CLK_PIN)
+#define CLK_LOW()    (CLK_PORT &= ~CLK_PIN)
+#define LOAD_HIGH()  (LOAD_PORT |= LOAD_PIN)
+#define LOAD_LOW()   (LOAD_PORT &= ~LOAD_PIN)
+
+volatile uint8_t matrix_data[8];
+volatile uint8_t byte_index = 0;
+
+void shortDelay(void) { __delay_cycles(100); }
+
+void sendByte(uint8_t address, uint8_t data) {
+    int i;
+    for (i = 7; i >= 0; i--) {
+        (address & (1 << i)) ? DATA_HIGH() : DATA_LOW();
+        CLK_HIGH(); shortDelay();
+        CLK_LOW();  shortDelay();
+    }
+    for (i = 7; i >= 0; i--) {
+        (data & (1 << i)) ? DATA_HIGH() : DATA_LOW();
+        CLK_HIGH(); shortDelay();
+        CLK_LOW();  shortDelay();
+    }
+    LOAD_HIGH(); shortDelay();
+    LOAD_LOW();  shortDelay();
+}
+
+void sendCommand(uint8_t cmd, uint8_t value) {
+    sendByte(cmd, value);
+}
+
+void initMAX7219(void) {
+    sendCommand(0x0F, 0x00); // Display test off
+    sendCommand(0x0C, 0x01); // Normal operation
+    sendCommand(0x0B, 0x07); // Scan all 8 digits
+    sendCommand(0x09, 0x00); // No decode
+    sendCommand(0x0A, 0x08); // Brightness medium
+}
+
+void updateMatrix(void) {
+    int i;
+    for (i = 0; i < 8; i++) {
+        sendByte(i + 1, matrix_data[i]);
+    }
+}
+
+int main(void) {
+    WDTCTL = WDTPW | WDTHOLD;
+
+    // SPI pin setup
+    DATA_DIR |= DATA_PIN;
+    CLK_DIR  |= CLK_PIN;
+    LOAD_DIR |= LOAD_PIN;
+    DATA_LOW(); CLK_LOW(); LOAD_LOW();
+
+    // Unlock GPIO
+    PM5CTL0 &= ~LOCKLPM5;
+
+    // Init MAX7219
+    initMAX7219();
+
+    // UART1 setup (P4.2 = RXD)
+    UCA1CTLW0 |= UCSWRST;
+    UCA1CTLW0 |= UCSSEL__SMCLK;
+    UCA1BRW = 104;        // 9600 baud
+    UCA1MCTLW = 0xD600;
+    P4SEL1 &= ~BIT2;
+    P4SEL0 |= BIT2;
+    UCA1CTLW0 &= ~UCSWRST;
+    UCA1IE |= UCRXIE;
+
+    __enable_interrupt();
+    while (1);
+}
+
+// UART RX ISR
+#pragma vector=EUSCI_A1_VECTOR
+__interrupt void EUSCI_A1_RX_ISR(void) {
+    uint8_t val = UCA1RXBUF;
+    matrix_data[byte_index++] = val;
+    if (byte_index >= 8) {
+        byte_index = 0;
+        updateMatrix();
+    }
+}
+
