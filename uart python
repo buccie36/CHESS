@@ -1,0 +1,25 @@
+import serial
+import time
+
+# Open UART to MSP430 (adjust COM port as needed)
+ser = serial.Serial('COM3', 9600, timeout=1)
+time.sleep(2)  # Wait for MSP430 reset
+
+# Example: X pattern
+pattern = [
+    0b10000000,
+    0b01000010,
+    0b00100100,
+    0b00011000,
+    0b00011000,
+    0b00100100,
+    0b01000010,
+    0b10000001
+]
+
+# Send pattern
+for byte in pattern:
+    ser.write(bytes([byte]))
+    time.sleep(0.01)
+
+ser.close()
