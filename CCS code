@@ -1,146 +1,142 @@
 #include <msp430.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
+#include <stdint.h>
 
-#define DIN     BIT0  // P2.0
-#define CLK     BIT1  // P2.1
-#define CS      BIT2  // P2.2
+// SPI Pins: P2.0 = DIN, P2.1 = CLK, P2.2 = LOAD
+#define DATA_PIN  BIT0
+#define CLK_PIN   BIT1
+#define LOAD_PIN  BIT2
 
-char uart_buffer[128];
-unsigned int uart_index = 0;
-unsigned char led_matrix[8] = {0};
+#define DATA_PORT P2OUT
+#define CLK_PORT  P2OUT
+#define LOAD_PORT P2OUT
 
-void delay() {
-    __delay_cycles(50);
+#define DATA_DIR  P2DIR
+#define CLK_DIR   P2DIR
+#define LOAD_DIR  P2DIR
+
+#define DATA_HIGH()  (DATA_PORT |= DATA_PIN)
+#define DATA_LOW()   (DATA_PORT &= ~DATA_PIN)
+#define CLK_HIGH()   (CLK_PORT |= CLK_PIN)
+#define CLK_LOW()    (CLK_PORT &= ~CLK_PIN)
+#define LOAD_HIGH()  (LOAD_PORT |= LOAD_PIN)
+#define LOAD_LOW()   (LOAD_PORT &= ~LOAD_PIN)
+
+volatile uint8_t matrix_data[8];
+volatile uint8_t byte_index = 0;
+volatile uint8_t receiving_frame = 0;
+
+void shortDelay(void) {
+    __delay_cycles(100);
 }
 
-void pulseClock() {
-    P2OUT |= CLK;  // Set CLK high
-    delay();       // Short delay
-    P2OUT &= ~CLK; // Set CLK low
-    delay();       // Short delay
-}
+void sendByte(uint8_t address, uint8_t data) {
+    int i;  // Declare loop variable here
 
-void sendByte(unsigned char data) {
-    int i;
-    for (i = 7; i >= 0; i--) {  // Declare loop variable outside the loop
-        if (data & (1 << i)) 
-            P2OUT |= DIN;  // Set DIN high
-        else 
-            P2OUT &= ~DIN; // Set DIN low
-        
-        pulseClock();  // Send clock pulse
-    }
-}
-
-void max7219Send(unsigned char address, unsigned char data) {
-    P2OUT &= ~CS;      // Load CS low to start communication
-    sendByte(address); // Send address
-    sendByte(data);    // Send data
-    P2OUT |= CS;       // Load CS high to end communication
-    delay();
-}
-
-void max7219Init() {
-    max7219Send(0x0C, 0x01); // Normal operation
-    max7219Send(0x09, 0x00); // No BCD
-    max7219Send(0x0B, 0x07); // Scan all digits
-    max7219Send(0x0A, 0x0F); // Max brightness
-    max7219Send(0x0F, 0x00); // Display test off
-
-    int o;
-    for (o = 1; o <= 8; o++) {  // Declare loop variable outside the loop
-        max7219Send(o, 0x00);  // Send 0 to all rows
-    }
-}
-
-void updateMatrix() {
-    int row;
-    for (row = 0; row < 8; row++) {  // Declare loop variable outside the loop
-        max7219Send(row + 1, led_matrix[row]); // Send data to MAX7219
-    }
-}
-
-void clearMatrix() {
-    memset(led_matrix, 0, sizeof(led_matrix)); // Clear led_matrix
-    updateMatrix();
-}
-
-void parseLEDCommand(char *cmd) {
-    clearMatrix();  // Clear previous board state
-    char *pair = strtok(cmd, ";");
-    while (pair != NULL) {
-        int col, row;
-        if (sscanf(pair, "%d,%d", &col, &row) == 2) {
-            if (row >= 0 && row < 8 && col >= 0 && col < 8) {
-                led_matrix[row] |= (1 << (7 - col)); // Set the bit for the LED
-            }
+    for (i = 7; i >= 0; i--) {
+        if (address & (1 << i)) {
+            DATA_HIGH();
+        } else {
+            DATA_LOW();
         }
-        pair = strtok(NULL, ";");
+        CLK_HIGH();
+        shortDelay();
+        CLK_LOW();
+        shortDelay();
     }
-    updateMatrix();  // Update the matrix with the new legal moves
-}
-
-void processCommand(char *cmd) {
-    if (strncmp(cmd, "LED:", 4) == 0) {
-        parseLEDCommand(cmd + 4);  // Parse the LED command (legal moves)
-    } else if (strncmp(cmd, "CLEAR", 5) == 0) {
-        clearMatrix();  // Clear the matrix
+    for (i = 7; i >= 0; i--) {
+        if (data & (1 << i)) {
+            DATA_HIGH();
+        } else {
+            DATA_LOW();
+        }
+        CLK_HIGH();
+        shortDelay();
+        CLK_LOW();
+        shortDelay();
     }
+    LOAD_HIGH();
+    shortDelay();
+    LOAD_LOW();
+    shortDelay();
 }
 
-void uartInit() {
-    P1SEL0 |= BIT4 | BIT5;  // RXD/TXD
-    P1SEL1 &= ~(BIT4 | BIT5); // Reset RXD/TXD
-
-    UCA0CTLW0 = UCSWRST;    // Put USCI in reset
-    UCA0CTLW0 |= UCSSEL__SMCLK;  // Clock source: SMCLK
-    UCA0BR0 = 104;           // 9600 baud rate with 1 MHz clock
-    UCA0BR1 = 0;
-    UCA0MCTLW = 0x2100;      // Modulation settings
-    UCA0CTLW0 &= ~UCSWRST;   // Release USCI from reset
-    UCA0IE |= UCRXIE;        // Enable receive interrupt
+void sendCommand(uint8_t cmd, uint8_t value) {
+    sendByte(cmd, value);
 }
 
-void gpioInit() {
-    P2DIR |= DIN | CLK | CS; // Set P2.0, P2.1, P2.2 as outputs
-    P2OUT &= ~(DIN | CLK | CS); // Set all to low
+void initMAX7219(void) {
+    sendCommand(0x0F, 0x00); // Display test off
+    sendCommand(0x0C, 0x01); // Normal operation
+    sendCommand(0x0B, 0x07); // Scan all 8 digits
+    sendCommand(0x09, 0x00); // No decode
+    sendCommand(0x0A, 0x08); // Brightness medium
+}
+
+void updateMatrix(void) {
+    uint8_t i;  // Declare loop variable here
+
+    __disable_interrupt();
+    for (i = 0; i < 8; i++) {
+        sendByte(i + 1, matrix_data[i]);
+    }
+    __enable_interrupt();
 }
 
 int main(void) {
-    WDTCTL = WDTPW | WDTHOLD;  // Stop watchdog timer
+    WDTCTL = WDTPW | WDTHOLD;   // Stop watchdog timer
 
-    gpioInit();
-    uartInit();
-    max7219Init();
+    // SPI pin setup
+    DATA_DIR |= DATA_PIN;
+    CLK_DIR  |= CLK_PIN;
+    LOAD_DIR |= LOAD_PIN;
+    DATA_LOW();
+    CLK_LOW();
+    LOAD_LOW();
 
-    __enable_interrupt(); // Enable global interrupt
+    // Unlock GPIO (for some MSP430 variants)
+    PM5CTL0 &= ~LOCKLPM5;
+
+    initMAX7219();
+
+    // UART1 setup (P4.2 = RXD)
+    UCA1CTLW0 |= UCSWRST;          // Put eUSCI in reset
+    UCA1CTLW0 |= UCSSEL__SMCLK;    // SMCLK as clock source
+    UCA1BRW = 104;                 // 9600 baud (assuming 1MHz SMCLK)
+    UCA1MCTLW = 0xD600;            // Modulation
+    P4SEL1 &= ~BIT2;
+    P4SEL0 |= BIT2;                // P4.2 UART RX
+    UCA1CTLW0 &= ~UCSWRST;         // Initialize eUSCI
+    UCA1IE |= UCRXIE;              // Enable RX interrupt
+
+    __enable_interrupt();
 
     while (1) {
-        __low_power_mode_0();  // Enter low-power mode while waiting for interrupts
+        __low_power_mode_0();  // Wait for interrupts
     }
 }
 
-// Interrupt Service Routine for UART receive
-#if defined(__TI_COMPILER_VERSION__) || defined(__IAR_SYSTEMS_ICC__)
-#pragma vector=USCI_A0_VECTOR
-__interrupt void USCI_A0_ISR(void)
-#elif defined(__GNUC__)
-void __attribute__ ((interrupt(USCI_A0_VECTOR))) USCI_A0_ISR(void)
-#else
-#error Compiler not supported!
-#endif
-{
-    if (UCA0IFG & UCRXIFG) {  // If RX interrupt flag is set
-        char received = UCA0RXBUF;  // Get received byte
+// UART RX ISR with frame start detection
+#pragma vector=EUSCI_A1_VECTOR
+__interrupt void EUSCI_A1_RX_ISR(void) {
+    uint8_t val = UCA1RXBUF;
+    uint8_t i;  // Declare loop variable here
 
-        if (received == '\n') {
-            uart_buffer[uart_index] = '\0';  // Null-terminate the buffer
-            processCommand(uart_buffer);     // Process the command
-            uart_index = 0;                 // Reset index
-        } else if (uart_index < sizeof(uart_buffer) - 1) {
-            uart_buffer[uart_index++] = received;  // Store byte in buffer
+    if (!receiving_frame) {
+        if (val == 0xFF) {    // Start of frame byte
+            receiving_frame = 1;
+            byte_index = 0;
+            for (i = 0; i < 8; i++) {
+                matrix_data[i] = 0;
+            }
         }
+        return;
+    }
+
+    matrix_data[byte_index++] = val;
+
+    if (byte_index >= 8) {
+        receiving_frame = 0;
+        byte_index = 0;
+        updateMatrix();
     }
 }
