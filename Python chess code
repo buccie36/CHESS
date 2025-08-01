@@ -4,13 +4,18 @@ from PIL import Image, ImageTk
 import chess
 import chess.pgn
 import chess.engine
+import serial
+import time
 import os
-
 
 class ChessAnalyzerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Chess Analyzer")
+        self.root.title("Chess but its cooler")
+
+        # Connect to MSP430 over serial (adjust COM port!)
+        self.ser = serial.Serial('COM3', 9600, timeout=1)
+        time.sleep(2)  # Wait for MSP430 to reset
 
         self.engine = chess.engine.SimpleEngine.popen_uci("stockfish/stockfish-windows-x86-64-avx2.exe")
         self.board = chess.Board()
@@ -18,9 +23,10 @@ class ChessAnalyzerApp:
         self.piece_images = self.load_piece_images()
         self.move_stack = []
         self.legal_moves_squares = []
-        self.display_index = None  # for move navigation
+        self.display_index = None
 
         self.setup_gui()
+        self.send_piece_matrix()  # Initial position
 
     def setup_gui(self):
         self.frame = tk.Frame(self.root)
@@ -53,7 +59,7 @@ class ChessAnalyzerApp:
         }
         piece_images = {}
         for symbol, filename in piece_symbols.items():
-            img = Image.open(f"wp.png")
+            img = Image.open(filename)
             piece_images[symbol] = ImageTk.PhotoImage(img.resize((50, 50)))
         return piece_images
 
@@ -94,10 +100,27 @@ class ChessAnalyzerApp:
                 self.refresh_board()
                 self.analyze_current_position()
                 self.update_move_history()
+                self.send_piece_matrix()       # <-- Send matrix bitmap
+                self.ser.write(b'b')           # <-- Tell MSP430 to blink LED
             else:
                 self.selected_square = None
                 self.legal_moves_squares = []
+
         self.refresh_board()
+
+    def send_piece_matrix(self):
+        bitmap = [0] * 8
+        for square in chess.SQUARES:
+            piece = self.board.piece_at(square)
+            if piece:
+                rank = 7 - chess.square_rank(square)  # 0 = top
+                file = chess.square_file(square)      # 0 = A
+                bitmap[rank] |= (1 << (7 - file))     # MSB = file A
+
+        self.ser.write(b'\xFF')  # Frame start byte
+        for byte in bitmap:
+            self.ser.write(bytes([byte]))
+
 
     def analyze_current_position(self):
         self.analysis_area.delete(1.0, tk.END)
@@ -146,6 +169,7 @@ class ChessAnalyzerApp:
         self.refresh_board()
         self.analyze_current_position()
         self.update_move_history()
+        self.send_piece_matrix()
 
     def reset_board(self):
         self.board.reset()
@@ -156,6 +180,7 @@ class ChessAnalyzerApp:
         self.analysis_area.delete(1.0, tk.END)
         self.move_history.delete(1.0, tk.END)
         self.update_analysis_bar(0)
+        self.send_piece_matrix()
 
     def show_previous_move(self):
         if self.display_index is None:
@@ -166,6 +191,7 @@ class ChessAnalyzerApp:
             self.refresh_board()
             self.analyze_current_position()
             self.update_move_history()
+            self.send_piece_matrix()
 
     def show_current_position(self):
         while self.display_index is not None and self.display_index < len(self.move_stack):
@@ -175,17 +201,16 @@ class ChessAnalyzerApp:
         self.refresh_board()
         self.analyze_current_position()
         self.update_move_history()
+        self.send_piece_matrix()
 
     def on_quit(self):
         self.engine.quit()
+        if self.ser:
+            self.ser.close()
         self.root.destroy()
-
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = ChessAnalyzerApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_quit)
-    root.mainloop()
-
-
-
+    root.mainloop() 
